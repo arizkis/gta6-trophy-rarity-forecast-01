@@ -27,8 +27,9 @@ counts view); the spread combines horizon, trend residual and component disagree
 to [0.45, 1.5] logits. Trophies pinned at ≥ 99.5% in every snapshot get a one-sided downside
 row near 99.99%. With fewer than 3 distinct page snapshots the program falls back to the last
 known rate shaded ×0.8 (launch-window dilution) with a refresh-risk spread. Every per-trophy
-computation is guarded: a failure falls back to a wide last-rate row, so a well-formed case
-never crashes.
+computation is guarded, and the shared machinery and the whole case carry safety nets too: any
+failure degrades to wide last-rate rows, so a well-formed case never crashes and always writes
+a valid forecast.
 
 ### Run it
 

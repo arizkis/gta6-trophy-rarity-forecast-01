@@ -123,7 +123,7 @@ def fallback_row(last_rate, days, horizon_hours):
     return quantiles(logit(m), sigma)
 
 
-def build_states(reads, n):
+def build_states(reads):
     """Distinct page snapshots: (players, rates) change -> new state. t = hours since first read."""
     states = []
     first_s = reads[0]["at_s"]
@@ -273,7 +273,7 @@ def forecast_case(case):
             rows.append({"id": trophies[i]["id"], "q": wide_row(None)})
         return {"trophies": rows}
 
-    states = build_states(reads, n)
+    states = build_states(reads)
     if len(states) < 3:
         for i in range(n):
             try:
@@ -283,10 +283,31 @@ def forecast_case(case):
             rows.append({"id": trophies[i]["id"], "q": q})
         return {"trophies": rows}
 
+    # A failure in the shared main-path machinery degrades to fallback rows, never a crash.
+    try:
+        rows = main_path(reads, states, trophies, last_known, at_s, target_s, horizon_hours, days)
+    except Exception:
+        rows = []
+        for i in range(n):
+            try:
+                q = fallback_row(last_known[i], days, horizon_hours)
+            except Exception:
+                q = wide_row(last_known[i])
+            rows.append({"id": trophies[i]["id"], "q": q})
+    return {"trophies": rows}
+
+
+def main_path(reads, states, trophies, last_known, at_s, target_s, horizon_hours, days):
+    """Three or more distinct states: pinned rows plus the trend-and-counts blend."""
+    n = len(trophies)
     t_last = (reads[-1]["at_s"] - reads[0]["at_s"]) / 3600.0
     t_target = t_last + horizon_hours
     p_hat = players_forecast(states, t_last, t_target)
     counts = earner_counts(states, n)
+
+    # Pinned trophies: rate >= 99.5 at every state (a null fails the test).
+    pinned = [all(s["rates"][i] is not None and s["rates"][i] >= 99.5 for s in states)
+              for i in range(n)]
 
     # Local window: states within 36 h of the last read (all states if fewer than 3).
     local_idx = [j for j, s in enumerate(states) if s["t"] >= t_last - 36.0]
@@ -321,7 +342,11 @@ def forecast_case(case):
         band_slopes.append(sum(members) / len(members) if members else 0.0)
 
     delta_x = math.log1p(t_target) - math.log1p(t_last)
+    rows = []
     for i in range(n):
+        if pinned[i]:
+            rows.append({"id": trophies[i]["id"], "q": pinned_row()})
+            continue
         try:
             shrunk = 0.72 * slopes[i] + 0.28 * band_slopes[band_of[i]]
             if abs(slopes[i]) < 0.02:
@@ -341,16 +366,17 @@ def forecast_case(case):
         except Exception:
             q = wide_row(last_known[i])
         rows.append({"id": trophies[i]["id"], "q": q})
-    return {"trophies": rows}
+    return rows
 
 
 def sanitize(rows):
-    """Finite, in [0, 100], non-decreasing, rounded half up to 4 decimals."""
+    """Exactly five quantiles per row: finite, in [0, 100], non-decreasing, half up to 4 decimals."""
     out = []
     for row in rows:
+        vals = list(row["q"])[:5]
         q, prev = [], 0.0
-        for v in row["q"]:
-            v = float(v)
+        for j in range(5):
+            v = float(vals[j]) if j < len(vals) else prev
             if not math.isfinite(v):
                 v = prev
             v = min(100.0, max(prev, max(0.0, v)))
@@ -360,11 +386,23 @@ def sanitize(rows):
     return out
 
 
+def emergency_rows(case):
+    """Last-resort rows if the whole-case forecast fails: wide spread around the last read."""
+    last = (case.get("history") or [{}])[-1]
+    rates = last.get("rates") or []
+    return [{"id": t["id"], "q": wide_row(rates[i] if i < len(rates) else None)}
+            for i, t in enumerate(case.get("trophies") or [])]
+
+
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     for path in sorted(INPUT_DIR.glob("*.in")):
         case = json.loads(path.read_text(encoding="utf-8"))
-        forecast = {"trophies": sanitize(forecast_case(case)["trophies"])}
+        try:
+            rows = forecast_case(case)["trophies"]
+        except Exception:
+            rows = emergency_rows(case)
+        forecast = {"trophies": sanitize(rows)}
         (OUTPUT_DIR / f"{path.stem}.out").write_text(
             json.dumps(forecast, separators=(",", ":")) + "\n", encoding="utf-8")
 
